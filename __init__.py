@@ -296,9 +296,15 @@ def _try_randomize_vss_choice(movie, source: str) -> bool:
         if controller is None:
             return True  # no owning controller is not something retrying fixes
 
-        choices = [random.randint(0, cell_count - 1) for _ in range(2)]
-        controller.VSS_ColorChoice[0] = choices[0]
-        controller.VSS_ColorChoice[1] = choices[1]
+        choices = (random.randint(0, cell_count - 1), random.randint(0, cell_count - 1))
+        # VSS_ColorChoice is a fixed-size UnrealScript array (int[2], not
+        # array<int>) - pyunrealsdk exposes it as an immutable Python tuple,
+        # confirmed in play: controller.VSS_ColorChoice[0] = x threw
+        # TypeError("'tuple' object does not support item assignment") on
+        # every single attempt, regardless of whether cells were ready -
+        # this, not timing, was the real reason nothing ever visibly
+        # changed. Reassign the whole tuple instead of an element.
+        controller.VSS_ColorChoice = choices
         logging.info(
             f"[ColorRandomizer] VSS via {source}: {cell_count} swatches -"
             f" set VSS_ColorChoice={choices}"
