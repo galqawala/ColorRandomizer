@@ -277,11 +277,19 @@ def try_randomize_vss_choice(movie) -> bool:
     mod cannot see into. Retried at the same throttled rate as
     on_player_possessed's pawn-readiness check, for the same reason.
     """
+    return _try_randomize_vss_choice(movie, "tick-retry")
+
+
+def _try_randomize_vss_choice(movie, source: str) -> bool:
+    """As try_randomize_vss_choice, but tagged with which candidate hook
+    called it - see the multi-candidate block below for why several
+    differently-tagged callers exist at once right now."""
     try:
         navigator = getattr(movie, "ColorNavigator", None)
         cells = getattr(navigator, "Cells", None) if navigator is not None else None
         cell_count = len(cells) if cells is not None else 0
         if cell_count <= 0:
+            logging.info(f"[ColorRandomizer] VSS via {source}: no cells yet")
             return False
 
         controller = getattr(movie, "PlayerOwner", None)
@@ -291,10 +299,13 @@ def try_randomize_vss_choice(movie) -> bool:
         choices = [random.randint(0, cell_count - 1) for _ in range(2)]
         controller.VSS_ColorChoice[0] = choices[0]
         controller.VSS_ColorChoice[1] = choices[1]
-        logging.info(f"[ColorRandomizer] VSS menu ({cell_count} swatches) - set VSS_ColorChoice={choices}")
+        logging.info(
+            f"[ColorRandomizer] VSS via {source}: {cell_count} swatches -"
+            f" set VSS_ColorChoice={choices}"
+        )
         return True
     except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] could not randomize VSS color choice: {ex!r}")
+        logging.warning(f"[ColorRandomizer] VSS via {source}: error {ex!r}")
         return True
 
 
@@ -329,6 +340,60 @@ def on_vss_menu_opened(
     unrealsdk.hooks.log_all_calls(True)
     call_trace_ticks_remaining = CALL_TRACE_TICKS
     logging.info("[ColorRandomizer] VSS menu opened - call trace started (~2s)")
+
+
+# --- Multiple candidate triggers, tried at once instead of one-guess-per-round ---
+# Two single-candidate guesses (Start() POST, a 30-tick throttled retry - both
+# above) were each shipped and confirmed wrong in play, one round trip apiece.
+# Rather than guess a third one blind, every remaining plausible candidate for
+# "ColorNavigator.Cells is actually populated by now" is wired up at once,
+# each tagged with its own name in the log (_try_randomize_vss_choice's
+# `source` param) - whichever one's log line shows a real swatch count
+# (not "no cells yet") the soonest/most reliably is the winner. Once known,
+# DELETE every candidate below except that one, and the tick-retry fallback
+# above should also be removed if a real event turns out to cover it.
+
+
+@hook("WillowGame.VehicleSpawnStationGFxMovie:extSetupCell", Type.POST)
+def on_vss_cell_setup(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Candidate: extSetupCell is the function that actually appends to
+    ColorNavigator.Cells (confirmed in VehicleSpawnStationGFxMovie.uc) - it
+    fires once per swatch, so re-applying every time is self-correcting:
+    whichever call turns out to be the last one leaves the final, complete
+    swatch count as the one actually used."""
+    _try_randomize_vss_choice(obj, "extSetupCell")
+
+
+@hook("WillowGame.VehicleSpawnStationGFxMovie:extSetUpVSSPage", Type.POST)
+def on_vss_page_setup(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Candidate: extSetUpVSSPage is native (no visible script body), called
+    around the same time as Start() sets up the page - trying it separately
+    in case its own completion is a better-timed signal than Start()'s."""
+    _try_randomize_vss_choice(obj, "extSetUpVSSPage")
+
+
+@hook("WillowGame.VehicleSpawnStationGFxMovie:InitButtons", Type.POST)
+def on_vss_buttons_init(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Candidate: InitButtons is the native function Start() calls directly
+    to set everything up - if cells are populated synchronously within it
+    (just not yet by the time Start() itself returns, for some reason not
+    visible from script), this POST hook would catch it."""
+    _try_randomize_vss_choice(obj, "InitButtons")
 
 
 @hook("WillowGame.VehicleSpawnStationGFxMovie:OnClose", Type.POST)
@@ -404,11 +469,8 @@ def on_recolor_retry(
             recolor_player(obj)
             pending_pawn = None
 
-    if pending_vss_movie is not None:
-        if try_randomize_vss_choice(pending_vss_movie):
-            pending_vss_movie = None
-        else:
-            logging.info("[ColorRandomizer] VSS menu not ready yet, will retry")
+    if pending_vss_movie is not None and try_randomize_vss_choice(pending_vss_movie):
+        pending_vss_movie = None
 
 
 @keybind(
@@ -442,6 +504,9 @@ build_mod(
         on_player_possessed,
         on_recolor_retry,
         on_vss_menu_opened,
+        on_vss_cell_setup,
+        on_vss_page_setup,
+        on_vss_buttons_init,
         on_vss_menu_closed,
     ],
     keybinds=[reroll_colors],
