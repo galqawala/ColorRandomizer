@@ -38,8 +38,8 @@ from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
 # supports both without any per-game branching.
 
 
-def random_hsv_rgb() -> tuple[float, float, float]:
-    """A random RGB triple (0-1 each) covering a genuinely broad range.
+def random_hsl_rgb() -> tuple[float, float, float]:
+    """A random RGB triple (0-1 each) using the FULL range of true HSL.
 
     This is NOT sampled from the game's own character-customization color
     grid - that grid's actual swatch values live inside the menu's
@@ -49,30 +49,34 @@ def random_hsv_rgb() -> tuple[float, float, float]:
     cell represents). Short of parsing the .swf itself, there's no in-game
     palette to draw from here - these are procedurally generated instead.
 
-    Hue fully random. Saturation 0.25-1.0 and value 0.35-1.0 (previously
-    0.6-1.0 for both) - confirmed in play that the narrower range made every
-    result look like the same handful of neon/highlighter tones. This wider
-    range still excludes the extremes (near-grey at the low end, near-black/
-    near-white at the other) so results stay readable as an actual paint
-    color, but now covers muted and pastel tones too, not just vivid ones.
+    Hue, saturation AND lightness are each drawn from the FULL 0-1 range -
+    every possible color is possible, including near-black/near-white/
+    near-grey results, per explicit instruction rather than the previous
+    version's "looks nice" 0.25-1.0/0.35-1.0 subrange (itself a widening of
+    an even narrower 0.6-1.0 range that made everything look neon - see
+    CLAUDE.md's "randomize a color" rule for why narrowing this by default
+    is wrong). True HSL (colorsys.hls_to_rgb, h/l/s argument order) rather
+    than HSV, as specifically requested - they are different models: HSL's
+    L=1.0 is white regardless of saturation, HSV's V=1.0 at S=1.0 is a pure
+    vivid color.
     """
     hue = random.random()
-    saturation = random.uniform(0.25, 1.0)
-    value = random.uniform(0.35, 1.0)
-    return colorsys.hsv_to_rgb(hue, saturation, value)
+    lightness = random.random()
+    saturation = random.random()
+    return colorsys.hls_to_rgb(hue, lightness, saturation)
 
 
 def random_linear_color() -> WrappedStruct:
-    """A random vivid color as a LinearColor struct (float 0-1 channels) -
-    what MaterialInstanceConstant.SetVectorParameterValue expects."""
-    r, g, b = random_hsv_rgb()
+    """A random color as a LinearColor struct (float 0-1 channels) - what
+    MaterialInstanceConstant.SetVectorParameterValue expects."""
+    r, g, b = random_hsl_rgb()
     return unrealsdk.make_struct("LinearColor", R=r, G=g, B=b, A=1.0)
 
 
 def random_byte_color() -> WrappedStruct:
-    """A random vivid color as a Color struct (byte 0-255 channels) - what
+    """A random color as a Color struct (byte 0-255 channels) - what
     SetPlayerUIPreferences expects for the player's own colors."""
-    r, g, b = random_hsv_rgb()
+    r, g, b = random_hsl_rgb()
     return unrealsdk.make_struct("Color", R=int(r * 255), G=int(g * 255), B=int(b * 255), A=255)
 
 
@@ -175,37 +179,34 @@ def on_vehicle_spawned(
     recolor_vehicle(obj)
 
 
-last_recolored_pawn = None
-
-
-@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
-def on_player_tick(
+@hook("WillowGame.WillowPlayerController:Possess", Type.POST)
+def on_player_possessed(
     obj: UObject,
-    __args: WrappedStruct,
+    args: WrappedStruct,
     __ret: any,
     __func: BoundFunction,
 ) -> None:
-    """Recolor the local player exactly once per pawn, tracked by identity.
+    """Recolor the local player exactly once per possession.
 
-    Originally a WillowPawn:PostBeginPlay hook (filtered to the local
-    player's own pawn via `get_pc().Pawn is obj`), matching how the vehicle
-    hook works - confirmed in play NOT to fire at the very start of a
-    session: `get_pc().Pawn` was not yet linked back to the newly-created
-    pawn at the exact instant PostBeginPlay ran on it, so the identity check
-    failed on the one spawn that mattered most, and only the manual reroll
-    keybind ever actually applied a color. PlayerTick only ever fires once
-    the pawn is fully alive and controlled, so this reads Pawn once it is
-    unambiguously valid instead of trying to catch the exact spawn instant -
-    same "identity/generation tracking beats sampling a transient state"
-    approach already used elsewhere in this collection of mods (e.g.
-    AutoLootBL1E's own world-settled tracking).
+    Fires once per Possess() call (game start, respawn after death, level
+    transitions) - not every tick. Two earlier versions of this hook were
+    tried and rejected, in order: (1) WillowPawn:PostBeginPlay, filtered to
+    the local player's own pawn via `get_pc().Pawn is obj` - confirmed in
+    play NOT to fire at actual game start, because `get_pc().Pawn` was not
+    yet linked back to the newly-created pawn at the exact instant
+    PostBeginPlay ran on it; (2) WillowPlayerController:PlayerTick, tracking
+    the last-recolored pawn by identity - this worked, but hooks every
+    single rendered frame forever for a check that only ever matters once
+    per spawn (see CLAUDE.md's PlayerTick rule). Possess(Pawn aPawn, bool
+    bVehicleTransition) hands the newly-possessed pawn directly as an
+    argument, sidestepping both problems at once: no per-tick cost, and no
+    ordering race, because it fires exactly when the controller takes
+    ownership of aPawn - there is nothing to wait for.
     """
-    global last_recolored_pawn
-    pawn = obj.Pawn
-    if pawn is None or pawn is last_recolored_pawn:
+    controller = get_pc()
+    if controller is not obj:
         return
-    last_recolored_pawn = pawn
-    recolor_player(obj)
+    recolor_player(controller)
 
 
 @keybind(
@@ -233,7 +234,7 @@ __version__: str
 __version_info__: tuple[int, ...]
 
 build_mod(
-    hooks=[on_vehicle_spawned, on_player_tick],
+    hooks=[on_vehicle_spawned, on_player_possessed],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
 )
