@@ -287,6 +287,59 @@ def on_recolor_retry(
     pending_pawn = None
 
 
+@hook("WillowGame.VehicleSpawnStationGFxMovie:Start", Type.POST)
+def on_vss_menu_opened(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Point the Catch-A-Ride color menu at a random valid swatch.
+
+    Our vehicles are recolored by writing material parameters directly
+    (recolor_vehicle), completely bypassing the menu's own swatch-index
+    system - so WillowPlayerController.VSS_ColorChoice[slot] (the per-bay
+    index the menu remembers and re-shows next time it opens, confirmed in
+    WillowPlayerController.uc/VehicleSpawnStationGFxMovie.uc: written on
+    OnClose, read back on open) never changes, and the menu kept showing
+    whatever it defaulted to - confirmed in play as always "blue".
+
+    This does not make the highlighted swatch match the vehicle's actual
+    (continuous, not palette-based) paint - by design, per explicit
+    instruction, since there is no reliable way to read the real swatch
+    RGB values (they live in the menu's Flash asset, not anywhere script-
+    readable - see random_hsl_rgb's docstring). It only stops the menu
+    always defaulting to the same one.
+
+    ColorNavigator.Cells is populated synchronously by InitButtons(),
+    called earlier in this same Start() - by the time this POST hook runs,
+    Cells.Length is the real, current swatch count for this specific menu,
+    not guessed. Sets both vehicle bays (index 0 and 1) since either could
+    be opened. May take one extra menu open to visibly apply, if VSSVM_Index
+    (what actually draws the highlight this frame) turns out to already be
+    latched from VSS_ColorChoice before this hook runs, in native code this
+    mod cannot see or hook into - not confirmed either way.
+    """
+    try:
+        navigator = getattr(obj, "ColorNavigator", None)
+        cells = getattr(navigator, "Cells", None) if navigator is not None else None
+        cell_count = len(cells) if cells is not None else 0
+        if cell_count <= 0:
+            logging.warning("[ColorRandomizer] VSS menu opened with no color cells found, skipping")
+            return
+
+        controller = getattr(obj, "PlayerOwner", None)
+        if controller is None:
+            return
+
+        choices = [random.randint(0, cell_count - 1) for _ in range(2)]
+        controller.VSS_ColorChoice[0] = choices[0]
+        controller.VSS_ColorChoice[1] = choices[1]
+        logging.info(f"[ColorRandomizer] VSS menu opened ({cell_count} swatches) - set VSS_ColorChoice={choices}")
+    except Exception as ex:  # noqa: BLE001
+        logging.warning(f"[ColorRandomizer] could not randomize VSS color choice: {ex!r}")
+
+
 @keybind(
     "Reroll Colors",
     "Insert",
@@ -312,7 +365,7 @@ __version__: str
 __version_info__: tuple[int, ...]
 
 build_mod(
-    hooks=[on_vehicle_spawned, on_player_possessed, on_recolor_retry],
+    hooks=[on_vehicle_spawned, on_player_possessed, on_recolor_retry, on_vss_menu_opened],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
 )
