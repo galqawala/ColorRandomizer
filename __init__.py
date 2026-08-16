@@ -255,35 +255,30 @@ def on_vss_cell_setup(
 ) -> None:
     """Randomize the VSS color menu's highlighted swatch.
 
-    Found by reading VehicleSpawnStationGFxMovie.uc directly instead of
-    guessing further: extSetupCell is what BOTH populates
-    ColorNavigator.Cells AND tells the Flash UI which swatch is highlighted,
-    via `AS_SetPrimaryColorIndex(VSSVM_Index[CurrentTab])` at the end of its
-    own body - called unconditionally, using whatever VSSVM_Index happens to
-    be (which starts at its default [0, 0], i.e. swatch 0 - confirmed in
-    play as always "blue", since nothing else in script ever writes to it).
+    Third attempt at finding what actually drives the on-screen highlight,
+    each one confirmed wrong or insufficient in play before moving to the
+    next:
+      1. WillowPlayerController.VSS_ColorChoice - a merely-persisted
+         preference field with no confirmed reader anywhere in script.
+      2. AS_SetPrimaryColorIndex(VSSVM_Index[CurrentTab]) - what
+         extSetupCell itself calls at the end of its own body. Ran with no
+         errors and a correct random index every time, confirmed in play to
+         still show no visible change - so whatever this ActionScript call
+         actually does in Flash, it is not "highlight this swatch".
+      3. This version: SetCellState(name, bool) + AS_UpdateColorBox(name),
+         the exact sequence extColorCellHover/extColorCellMove use - the
+         real, PROVEN-working path, since manually moving/hovering between
+         swatches during play visibly works. Both are plain UnrealScript
+         functions callable directly (SetCellState itself builds the
+         low-level ASValue/Invoke call internally), so no need to replicate
+         that part by hand.
 
-    Two earlier fix attempts (across several rounds, including a batch of
-    parallel candidate hooks) all targeted WillowPlayerController.
-    VSS_ColorChoice instead - confirmed once its own write finally succeeded,
-    in play, that it has no connection to this display path at all; it is a
-    separate, merely-persisted preference field with no confirmed reader
-    anywhere in script. Deleted along with every other candidate hook that
-    was testing when Cells populates (Start(), extSetUpVSSPage, InitButtons,
-    a throttled tick retry, a bounded call trace) - the real problem was
-    never timing, it was writing to the wrong field, and extSetupCell alone
-    is both correctly-timed (cells exist by the time it is called, since it
-    is the function adding them) and the actual function the display reads.
-
-    Fires once per swatch (8 in this install) - calling AS_SetPrimaryColorIndex
-    ourselves after each one is self-correcting AND authoritative: every call
-    pushes its own choice to Flash immediately, so even the very last swatch
-    processed ends up shown, rather than depending on some later call to
-    happen to pick up an earlier write.
-
-    VSSVM_Index is also a fixed-size array (int[2]) - pyunrealsdk exposes it
-    as an immutable tuple, same as VSS_ColorChoice; reassign the whole tuple,
-    never an element (see CLAUDE.md's fixed-array gotcha).
+    Fires once per swatch (8 in this install) - reapplying every time is
+    self-correcting: each call unhighlights whatever it PREVIOUSLY selected
+    and highlights its new pick, exactly mirroring how real hover events
+    chain together, so even the very last swatch processed ends up shown
+    correctly rather than depending on some later call to pick up an
+    earlier write.
     """
     try:
         navigator = getattr(obj, "ColorNavigator", None)
@@ -292,22 +287,35 @@ def on_vss_cell_setup(
         if cell_count <= 0:
             return
 
-        choices = (random.randint(0, cell_count - 1), random.randint(0, cell_count - 1))
-        obj.VSSVM_Index = choices
-        current_tab = getattr(obj, "CurrentTab", 0)
-        index = choices[current_tab] if current_tab in (0, 1) else choices[0]
-        obj.PrimaryColorIndex = index
-        obj.InitialColorIndex = index
-        obj.AS_SetPrimaryColorIndex(index)
+        old_index = getattr(obj, "PrimaryColorIndex", 0)
+        new_index = random.randint(0, cell_count - 1)
+        old_name = navigator.CellName(old_index)
+        new_name = navigator.CellName(new_index)
 
-        # Best-effort: also update the persisted preference, in case
-        # something else (e.g. what color a newly-bought vehicle starts
-        # with) reads it - unconfirmed, but harmless to set regardless.
+        obj.SetCellState(old_name, False)
+        obj.SetCellState(new_name, True)
+        obj.PrimaryColorIndex = new_index
+        obj.InitialColorIndex = new_index
+        obj.AS_UpdateColorBox(new_name)
+
+        # Keep VSSVM_Index/VSS_ColorChoice in sync too, matching
+        # extUpdateColorBox's own commit logic - both fixed-size arrays
+        # (int[2]), exposed by pyunrealsdk as immutable tuples, so
+        # reassigned whole rather than by element (CLAUDE.md's fixed-array
+        # gotcha).
+        current_tab = getattr(obj, "CurrentTab", 0)
+        indices = list(getattr(obj, "VSSVM_Index", (0, 0)))
+        if current_tab in (0, 1):
+            indices[current_tab] = new_index
+        obj.VSSVM_Index = tuple(indices)
         controller = getattr(obj, "PlayerOwner", None)
         if controller is not None:
-            controller.VSS_ColorChoice = choices
+            controller.VSS_ColorChoice = tuple(indices)
 
-        logging.info(f"[ColorRandomizer] VSS swatch highlighted: {index} of {cell_count}")
+        logging.info(
+            f"[ColorRandomizer] VSS swatch highlighted (hover-path): {new_index}"
+            f" ('{new_name}') of {cell_count}"
+        )
     except Exception as ex:  # noqa: BLE001
         logging.warning(f"[ColorRandomizer] could not randomize VSS swatch: {ex!r}")
 
