@@ -189,49 +189,44 @@ def recolor_player(controller) -> bool:
         return False
 
 
-@hook("WillowGame.WillowVehicle:PostBeginPlay", Type.POST)
-def on_vehicle_spawned(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    if not is_host(obj):
-        return
-    recolor_vehicle(obj)
+# Vehicle paint recoloring is DISABLED as of 2026-08-16. Confirmed in play:
+# vehicles were consistently showing as a flat, low-detail blue/gray model -
+# not the original vehicle appearance and not our random color either,
+# consistent with a broken/fallback material rather than a "didn't apply"
+# problem. Constructing a new MaterialInstanceConstant parented to the
+# vehicle's own existing VehicleMaterial wrapper (an instance-of-an-instance
+# chain) is the leading suspect, unconfirmed. recolor_vehicle() and its
+# hooks are left in place, just not called, so this can be re-enabled and
+# debugged later without rewriting it from scratch - do not delete.
+#
+# @hook("WillowGame.WillowVehicle:PostBeginPlay", Type.POST)
+# def on_vehicle_spawned(
+#     obj: UObject,
+#     __args: WrappedStruct,
+#     __ret: any,
+#     __func: BoundFunction,
+# ) -> None:
+#     if not is_host(obj):
+#         return
+#     recolor_vehicle(obj)
 
 
-@hook("WillowGame.WillowVehicle:SetVehicleSpawning", Type.POST)
-def on_vehicle_spawning_changed(
-    obj: UObject,
-    args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Reapply the recolor once the platform "materializing" animation ends.
-
-    Confirmed by reading WillowVehicle.uc directly, after a ~3s call trace
-    (starting at PostBeginPlay) proved too short to capture this event at
-    all - the animation runs longer than that. SetVehicleSpawning(bool
-    bInSpawning) brackets the shimmer/hologram effect Catch-A-Ride vehicles
-    play while rising off the platform: entering (true) swaps the mesh to a
-    temporary SpawnMaterial and records whatever was on it before; exiting
-    (false) restores `Mesh.SetMaterial(0, VehicleMaterial)` directly from
-    the field. Since recolor_vehicle() only ever changes VehicleMaterial's
-    PARENT (never reassigns the field itself), that restore should already
-    end up showing our color correctly on its own - but reapplying here too
-    costs nothing and removes any dependency on getting that reasoning
-    right, or on exactly how multiple mesh components' own recorded
-    material snapshots interact with it. Runs in addition to, not instead
-    of, on_vehicle_spawned above: pre-existing or non-Catch-A-Ride vehicles
-    (enemy-spawned, already in the world on load) may never call this at
-    all, so PostBeginPlay remains the only trigger for those.
-    """
-    if not is_host(obj):
-        return
-    if getattr(args, "bInSpawning", True):
-        return  # only reapply once, on the exit (false) transition
-    recolor_vehicle(obj)
+# Also disabled along with on_vehicle_spawned above (see that comment) -
+# this was the "reapply once the materialize animation ends" half of the
+# same now-disabled feature.
+#
+# @hook("WillowGame.WillowVehicle:SetVehicleSpawning", Type.POST)
+# def on_vehicle_spawning_changed(
+#     obj: UObject,
+#     args: WrappedStruct,
+#     __ret: any,
+#     __func: BoundFunction,
+# ) -> None:
+#     if not is_host(obj):
+#         return
+#     if getattr(args, "bInSpawning", True):
+#         return  # only reapply once, on the exit (false) transition
+#     recolor_vehicle(obj)
 
 
 # The pawn most recently possessed but not yet successfully recolored, or
@@ -313,29 +308,56 @@ def on_vss_color_picking_started(
     picker - calls SetCellState(current, true) once) -> extColorCellHover
     (each real hover - does SetCellState(old, false) + SetCellState(new,
     true) + AS_UpdateColorBox, reading PrimaryColorIndex itself so it can
-    never go stale) -> extFinishColorPicking (exit). Rather than replicate
-    that internal logic a second time (the mistake in attempt 3), this
-    calls extColorCellHover directly - the exact same function a real
-    hover calls, with a random cell name instead of wherever the player's
-    input pointed - so there is exactly one source of truth for "how do I
-    move the highlight" and it can't desync from the real thing.
-    """
-    try:
-        navigator = getattr(obj, "ColorNavigator", None)
-        cells = getattr(navigator, "Cells", None) if navigator is not None else None
-        cell_count = len(cells) if cells is not None else 0
-        if cell_count <= 0:
-            return
+    never go stale) -> extFinishColorPicking (exit).
 
-        new_index = random.randint(0, cell_count - 1)
+    Per explicit instruction: rather than trust extColorCellHover alone,
+    this now calls every function seen in that trace with the SAME random
+    cell, one after another, each in its own try/except so one failing
+    (e.g. a signature this mod guessed wrong) does not stop the rest -
+    extColorCellHover (real hover, PROVEN to update the display correctly),
+    extSetPrimaryColorIndex (the Flash->script callback function, called
+    directly instead of waiting for Flash to call it), AS_SetPrimaryColorIndex
+    and AS_UpdateColorBox (the two script->Flash ActionScript calls),
+    SetCellState (the low-level per-cell highlight toggle, on+off), and
+    extUpdateColorBox (the "commit" function that writes VSSVM_Index[
+    CurrentTab] - the only one in this list not otherwise reached by
+    extColorCellHover's own call chain). Each attempt is logged by name so
+    a future pass can tell exactly which ones actually ran without error.
+    """
+    navigator = getattr(obj, "ColorNavigator", None)
+    cells = getattr(navigator, "Cells", None) if navigator is not None else None
+    cell_count = len(cells) if cells is not None else 0
+    if cell_count <= 0:
+        return
+
+    new_index = random.randint(0, cell_count - 1)
+    old_index = getattr(obj, "PrimaryColorIndex", 0)
+    try:
+        old_name = navigator.CellName(old_index)
         new_name = navigator.CellName(new_index)
-        obj.extColorCellHover(new_name)
-        logging.info(
-            f"[ColorRandomizer] VSS color picker opened - moved to swatch"
-            f" {new_index} ('{new_name}') of {cell_count}"
-        )
     except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] could not randomize VSS swatch: {ex!r}")
+        logging.warning(f"[ColorRandomizer] VSS: could not resolve cell names: {ex!r}")
+        return
+
+    logging.info(
+        f"[ColorRandomizer] VSS color picker opened - calling every traced"
+        f" function with swatch {new_index} ('{new_name}') of {cell_count}"
+    )
+
+    def attempt(label: str, func) -> None:
+        try:
+            func()
+            logging.info(f"[ColorRandomizer] VSS via {label}: ok")
+        except Exception as ex:  # noqa: BLE001
+            logging.warning(f"[ColorRandomizer] VSS via {label}: error {ex!r}")
+
+    attempt("extColorCellHover", lambda: obj.extColorCellHover(new_name))
+    attempt("extSetPrimaryColorIndex", lambda: obj.extSetPrimaryColorIndex(new_name))
+    attempt("AS_SetPrimaryColorIndex", lambda: obj.AS_SetPrimaryColorIndex(new_index))
+    attempt("SetCellState(old,False)", lambda: obj.SetCellState(old_name, False))
+    attempt("SetCellState(new,True)", lambda: obj.SetCellState(new_name, True))
+    attempt("AS_UpdateColorBox", lambda: obj.AS_UpdateColorBox(new_name))
+    attempt("extUpdateColorBox", lambda: obj.extUpdateColorBox(new_index))
 
 
 @hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
@@ -405,8 +427,6 @@ __version_info__: tuple[int, ...]
 
 build_mod(
     hooks=[
-        on_vehicle_spawned,
-        on_vehicle_spawning_changed,
         on_player_possessed,
         on_recolor_retry,
         on_vss_color_picking_started,
