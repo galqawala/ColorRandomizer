@@ -65,6 +65,15 @@ def random_byte_color() -> WrappedStruct:
     return unrealsdk.make_struct("Color", R=int(r * 255), G=int(g * 255), B=int(b * 255), A=255)
 
 
+# Confirmed directly, twice: a real trace showed extSetupCell firing 8 times
+# per vehicle bay, and separately the user's own observation of the actual
+# Catch-A-Ride menu ("out of the 8 options"). Not read dynamically here -
+# ColorNavigator.Cells (the live count) only ever exists while a
+# VehicleSpawnStationGFxMovie is actually open, which is never the case at
+# the point recolor_player() runs.
+VSS_SWATCH_COUNT = 8
+
+
 def player_pawn_is_ready(pawn) -> bool:
     """Whether this pawn's own body/materials setup looks complete enough to
     recolor meaningfully.
@@ -113,9 +122,38 @@ def recolor_player(controller) -> bool:
             random_byte_color(),
             head_index,
         )
+
+        # Also randomize the PERSISTED Catch-A-Ride color choice. Confirmed
+        # by the user directly: this value survives a full game restart and
+        # is what the menu shows as "currently selected" every time it's
+        # freshly opened - WillowPlayerController.uc syncs it both ways with
+        # the player's PlayerProfile (Profile.VSS_ColorChoice[I] <->
+        # VSS_ColorChoice[I]) on save/load, exactly the kind of save-data
+        # storage the user suspected.
+        #
+        # An earlier attempt at this exact field was abandoned as "no
+        # connection to the display" - but that attempt only ever wrote it
+        # from inside the VSS menu's own Start()/extSetupCell hooks, i.e.
+        # WHILE the menu was already open, after its in-memory display state
+        # (VSSVM_Index) had already been initialized from the OLD value for
+        # that session. It was never tested against a freshly-(re)opened
+        # menu, which - per the user's own restart observation - is the
+        # only time this field actually gets read. Setting it here instead,
+        # at spawn (well before any menu could exist yet), sidesteps that
+        # ordering problem entirely.
+        #
+        # Fixed-size array (int[2]) - pyunrealsdk exposes it as an immutable
+        # tuple, so the whole tuple is reassigned, never an element
+        # (confirmed gotcha, see CLAUDE.md).
+        vss_choice = (
+            random.randint(0, VSS_SWATCH_COUNT - 1),
+            random.randint(0, VSS_SWATCH_COUNT - 1),
+        )
+        controller.VSS_ColorChoice = vss_choice
+
         logging.info(
             f"[ColorRandomizer] rerolled player colors, head={head_index} (of {head_count},"
-            f" body_class={'set' if body_class is not None else 'NONE'})"
+            f" body_class={'set' if body_class is not None else 'NONE'}), VSS_ColorChoice={vss_choice}"
         )
         return True
     except Exception as ex:  # noqa: BLE001

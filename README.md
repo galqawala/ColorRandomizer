@@ -16,13 +16,20 @@ visible change.
 Press **Insert** (rebindable in the mod menu) to reroll immediately, without
 waiting to respawn.
 
+Each reroll also randomizes `VSS_ColorChoice`, the *persisted* Catch-A-Ride
+color preference (one of the menu's 8 swatches, per vehicle bay) - the same
+value that survives a full game restart and determines which swatch the
+menu shows as "currently selected" the next time it's freshly opened.
+
 ## What this mod does NOT do
 
-Vehicle paint and Catch-A-Ride color-picker randomization were both
-attempted and removed: vehicle recoloring left vehicles showing a
-broken-looking flat model rather than a real paint job, and the color
-picker's swatch highlight could be moved but never actually stuck as a
-selection. Out of scope for now.
+Live vehicle paint and driving the Catch-A-Ride color-picker's on-screen
+highlight while it's open were both attempted and removed: vehicle
+recoloring left vehicles showing a broken-looking flat model rather than a
+real paint job, and moving the picker's live highlight never stuck as an
+actual selection while the menu was already open. Randomizing the
+*persisted* choice (above) sidesteps both - it's read fresh only when the
+menu next opens, not while any menu is live.
 
 ## Install
 
