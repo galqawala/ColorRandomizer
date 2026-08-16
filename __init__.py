@@ -246,78 +246,19 @@ def on_player_possessed(
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
 
 
-@hook("WillowGame.VehicleSpawnStationGFxMovie:extSetupCell", Type.POST)
-def on_vss_cell_setup(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Randomize the VSS color menu's highlighted swatch.
-
-    Third attempt at finding what actually drives the on-screen highlight,
-    each one confirmed wrong or insufficient in play before moving to the
-    next:
-      1. WillowPlayerController.VSS_ColorChoice - a merely-persisted
-         preference field with no confirmed reader anywhere in script.
-      2. AS_SetPrimaryColorIndex(VSSVM_Index[CurrentTab]) - what
-         extSetupCell itself calls at the end of its own body. Ran with no
-         errors and a correct random index every time, confirmed in play to
-         still show no visible change - so whatever this ActionScript call
-         actually does in Flash, it is not "highlight this swatch".
-      3. This version: SetCellState(name, bool) + AS_UpdateColorBox(name),
-         the exact sequence extColorCellHover/extColorCellMove use - the
-         real, PROVEN-working path, since manually moving/hovering between
-         swatches during play visibly works. Both are plain UnrealScript
-         functions callable directly (SetCellState itself builds the
-         low-level ASValue/Invoke call internally), so no need to replicate
-         that part by hand.
-
-    Fires once per swatch (8 in this install) - reapplying every time is
-    self-correcting: each call unhighlights whatever it PREVIOUSLY selected
-    and highlights its new pick, exactly mirroring how real hover events
-    chain together, so even the very last swatch processed ends up shown
-    correctly rather than depending on some later call to pick up an
-    earlier write.
-    """
-    try:
-        navigator = getattr(obj, "ColorNavigator", None)
-        cells = getattr(navigator, "Cells", None) if navigator is not None else None
-        cell_count = len(cells) if cells is not None else 0
-        if cell_count <= 0:
-            return
-
-        old_index = getattr(obj, "PrimaryColorIndex", 0)
-        new_index = random.randint(0, cell_count - 1)
-        old_name = navigator.CellName(old_index)
-        new_name = navigator.CellName(new_index)
-
-        obj.SetCellState(old_name, False)
-        obj.SetCellState(new_name, True)
-        obj.PrimaryColorIndex = new_index
-        obj.InitialColorIndex = new_index
-        obj.AS_UpdateColorBox(new_name)
-
-        # Keep VSSVM_Index/VSS_ColorChoice in sync too, matching
-        # extUpdateColorBox's own commit logic - both fixed-size arrays
-        # (int[2]), exposed by pyunrealsdk as immutable tuples, so
-        # reassigned whole rather than by element (CLAUDE.md's fixed-array
-        # gotcha).
-        current_tab = getattr(obj, "CurrentTab", 0)
-        indices = list(getattr(obj, "VSSVM_Index", (0, 0)))
-        if current_tab in (0, 1):
-            indices[current_tab] = new_index
-        obj.VSSVM_Index = tuple(indices)
-        controller = getattr(obj, "PlayerOwner", None)
-        if controller is not None:
-            controller.VSS_ColorChoice = tuple(indices)
-
-        logging.info(
-            f"[ColorRandomizer] VSS swatch highlighted (hover-path): {new_index}"
-            f" ('{new_name}') of {cell_count}"
-        )
-    except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] could not randomize VSS swatch: {ex!r}")
+# --- Temporarily disabled while tracing the real interaction ---
+# Two guesses at what drives the on-screen highlight (VSS_ColorChoice, then
+# AS_SetPrimaryColorIndex, then SetCellState+AS_UpdateColorBox) each either
+# had no visible effect or, per the SetCellState version, a WRONG one
+# (multiple swatches shown highlighted at once - meaning that call chain
+# does affect the display, just not correctly the way this code drives it).
+# Rather than guess a fourth variant, on_vss_menu_opened/on_vss_menu_closed
+# below capture a full, unbounded call trace (unrealsdk.calls.tsv) for the
+# ENTIRE time the menu is open, so a real manual color pick can be traced
+# and the exact real call sequence read directly instead of inferred from
+# static script. Re-enable and fix this function once that trace is read.
+def on_vss_cell_setup_DISABLED(obj) -> None:
+    pass
 
 
 @hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
@@ -360,6 +301,38 @@ def on_recolor_retry(
         pending_pawn = None
 
 
+@hook("WillowGame.VehicleSpawnStationGFxMovie:Start", Type.POST)
+def on_vss_menu_opened(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Start a full-session call trace - see on_vss_cell_setup_DISABLED's
+    comment above for why. Unlike the earlier bounded (~2s) trace attempt,
+    this one runs for as long as the menu stays open, closed by
+    on_vss_menu_closed below - long enough to capture an actual manual
+    color pick, not just the menu's own setup. Please keep the menu open
+    only briefly (open, pick one or two different colors, close) to keep
+    unrealsdk.calls.tsv a manageable size - it logs on the order of 10,000
+    lines/second.
+    """
+    unrealsdk.hooks.log_all_calls(True)
+    logging.info("[ColorRandomizer] VSS menu opened - call trace started (unbounded, until close)")
+
+
+@hook("WillowGame.VehicleSpawnStationGFxMovie:OnClose", Type.POST)
+def on_vss_menu_closed(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Stop the call trace started by on_vss_menu_opened."""
+    unrealsdk.hooks.log_all_calls(False)
+    logging.info("[ColorRandomizer] VSS menu closed - call trace stopped")
+
+
 @keybind(
     "Reroll Colors",
     "Insert",
@@ -390,7 +363,8 @@ build_mod(
         on_vehicle_spawned,
         on_player_possessed,
         on_recolor_retry,
-        on_vss_cell_setup,
+        on_vss_menu_opened,
+        on_vss_menu_closed,
     ],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
