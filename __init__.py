@@ -189,15 +189,6 @@ def recolor_player(controller) -> bool:
         return False
 
 
-# One-shot diagnostic: does something else re-apply the terminal's "official"
-# chosen color to the vehicle sometime AFTER PostBeginPlay, silently
-# overwriting our random one? Traces every Unreal call for ~3s starting at
-# spawn - see on_recolor_retry's countdown for how this is turned back off.
-# DELETE this and the countdown once answered.
-vehicle_trace_ticks_remaining = 0
-VEHICLE_TRACE_TICKS = 180  # roughly 3 seconds at 60fps
-
-
 @hook("WillowGame.WillowVehicle:PostBeginPlay", Type.POST)
 def on_vehicle_spawned(
     obj: UObject,
@@ -205,14 +196,42 @@ def on_vehicle_spawned(
     __ret: any,
     __func: BoundFunction,
 ) -> None:
-    global vehicle_trace_ticks_remaining
     if not is_host(obj):
         return
     recolor_vehicle(obj)
 
-    unrealsdk.hooks.log_all_calls(True)
-    vehicle_trace_ticks_remaining = VEHICLE_TRACE_TICKS
-    logging.info("[ColorRandomizer] vehicle spawned - call trace started (~3s)")
+
+@hook("WillowGame.WillowVehicle:SetVehicleSpawning", Type.POST)
+def on_vehicle_spawning_changed(
+    obj: UObject,
+    args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Reapply the recolor once the platform "materializing" animation ends.
+
+    Confirmed by reading WillowVehicle.uc directly, after a ~3s call trace
+    (starting at PostBeginPlay) proved too short to capture this event at
+    all - the animation runs longer than that. SetVehicleSpawning(bool
+    bInSpawning) brackets the shimmer/hologram effect Catch-A-Ride vehicles
+    play while rising off the platform: entering (true) swaps the mesh to a
+    temporary SpawnMaterial and records whatever was on it before; exiting
+    (false) restores `Mesh.SetMaterial(0, VehicleMaterial)` directly from
+    the field. Since recolor_vehicle() only ever changes VehicleMaterial's
+    PARENT (never reassigns the field itself), that restore should already
+    end up showing our color correctly on its own - but reapplying here too
+    costs nothing and removes any dependency on getting that reasoning
+    right, or on exactly how multiple mesh components' own recorded
+    material snapshots interact with it. Runs in addition to, not instead
+    of, on_vehicle_spawned above: pre-existing or non-Catch-A-Ride vehicles
+    (enemy-spawned, already in the world on load) may never call this at
+    all, so PostBeginPlay remains the only trigger for those.
+    """
+    if not is_host(obj):
+        return
+    if getattr(args, "bInSpawning", True):
+        return  # only reapply once, on the exit (false) transition
+    recolor_vehicle(obj)
 
 
 # The pawn most recently possessed but not yet successfully recolored, or
@@ -339,16 +358,7 @@ def on_recolor_retry(
     (`pending_pawn is None`) once resolved instead of running every frame
     for the rest of the session.
     """
-    global pending_pawn, ticks_until_retry, vehicle_trace_ticks_remaining
-
-    if vehicle_trace_ticks_remaining > 0:
-        # Frame-accurate countdown, deliberately not subject to the
-        # throttling below - see on_vehicle_spawned's diagnostic block.
-        vehicle_trace_ticks_remaining -= 1
-        if vehicle_trace_ticks_remaining == 0:
-            unrealsdk.hooks.log_all_calls(False)
-            logging.info("[ColorRandomizer] vehicle call trace window closed")
-
+    global pending_pawn, ticks_until_retry
     if pending_pawn is None:
         return
     ticks_until_retry -= 1
@@ -396,6 +406,7 @@ __version_info__: tuple[int, ...]
 build_mod(
     hooks=[
         on_vehicle_spawned,
+        on_vehicle_spawning_changed,
         on_player_possessed,
         on_recolor_retry,
         on_vss_color_picking_started,
