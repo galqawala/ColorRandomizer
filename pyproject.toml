@@ -1,0 +1,16 @@
+[project]
+name = "RandomVehicleColor"
+version = "1.0.1"
+authors = [{ name = "galqawala" }]
+description = "Gives every vehicle (Runner, Racer, etc.) a random paint color the moment it spawns."
+
+[tool.sdkmod]
+name = "RandomVehicleColor"
+supported_games = ["BL1", "BL1E"]
+coop_support = "Unknown"
+auto_enable = true
+download = "https://github.com/galqawala/RandomVehicleColor/raw/refs/heads/master/RandomVehicleColor.sdkmod"
+
+[tool.sdkmod.license]
+name = "GPL3"
+url = "https://choosealicense.com/licenses/gpl-3.0/"
