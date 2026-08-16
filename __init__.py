@@ -201,10 +201,13 @@ def on_vehicle_spawned(
     recolor_vehicle(obj)
 
 
-# The pawn most recently possessed but not yet successfully recolored, or
-# None once it has been (or there is nothing pending). Read by the throttled
-# retry hook below - see its docstring for why a retry exists at all.
+# The pawn most recently possessed but not yet successfully recolored, and
+# the most recently opened VSS color menu not yet successfully randomized -
+# each None once resolved (or nothing pending). Both are read by the same
+# throttled retry hook below - see its docstring for why a retry exists at
+# all, and try_randomize_vss_choice's docstring for the VSS-specific case.
 pending_pawn = None
+pending_vss_movie = None
 ticks_until_retry = 0
 RETRY_INTERVAL_TICKS = 30
 
@@ -246,45 +249,53 @@ def on_player_possessed(
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
 
 
-@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
-def on_recolor_retry(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Apply the pending recolor once the possessed pawn looks ready.
+def try_randomize_vss_choice(movie) -> bool:
+    """Attempt to point the VSS color menu at a random valid swatch.
 
-    This DOES hook PlayerTick, which CLAUDE.md's own rule says to avoid -
-    justified here because it is the rule's own explicitly-named escape
-    hatch ("where a tick hook is genuinely unavoidable, gate it behind a
-    counter/timer so the real work runs far less often than every frame"):
-    there is no single dedicated event confirmed to fire only once the
-    pawn's body/materials are actually ready (Possess fires too early - see
-    on_player_possessed above), so this polls for readiness instead of for
-    the spawn itself, at a throttled rate, and does entirely nothing
-    (`pending_pawn is None`) once resolved instead of running every frame
-    for the rest of the session.
+    Returns True once resolved (success OR a real error not worth retrying),
+    False to mean "not ready yet, try again".
+
+    Our vehicles are recolored by writing material parameters directly
+    (recolor_vehicle), completely bypassing the menu's own swatch-index
+    system - so WillowPlayerController.VSS_ColorChoice[slot] (the per-bay
+    index the menu remembers and re-shows next time it opens, confirmed in
+    WillowPlayerController.uc/VehicleSpawnStationGFxMovie.uc: written on
+    OnClose, read back on open) never changed, and the menu kept showing
+    whatever it defaulted to - confirmed in play as always "blue".
+
+    This does not make the highlighted swatch match the vehicle's actual
+    (continuous, not palette-based) paint - by design, per explicit
+    instruction, since there is no reliable way to read the real swatch RGB
+    values (they live in the menu's Flash asset, not anywhere script-
+    readable - see random_hsl_rgb's docstring). It only stops the menu
+    always defaulting to the same one.
+
+    ColorNavigator.Cells was assumed populated synchronously by InitButtons()
+    (called earlier in the menu's own Start()) - confirmed WRONG in play:
+    every one of 5 opens logged "no color cells found", meaning the swatch
+    list genuinely is not populated yet at that point, in native code this
+    mod cannot see into. Retried at the same throttled rate as
+    on_player_possessed's pawn-readiness check, for the same reason.
     """
-    global pending_pawn, ticks_until_retry
-    if pending_pawn is None:
-        return
-    ticks_until_retry -= 1
-    if ticks_until_retry > 0:
-        return
-    ticks_until_retry = RETRY_INTERVAL_TICKS
+    try:
+        navigator = getattr(movie, "ColorNavigator", None)
+        cells = getattr(navigator, "Cells", None) if navigator is not None else None
+        cell_count = len(cells) if cells is not None else 0
+        if cell_count <= 0:
+            return False
 
-    if obj.Pawn is not pending_pawn:
-        # The pending pawn was replaced (e.g. died again) before it was ever
-        # successfully recolored - drop it and let the newer Possess() call
-        # (which already reset ticks_until_retry) take over.
-        return
-    if not player_pawn_is_ready(pending_pawn):
-        logging.info("[ColorRandomizer] pawn not ready yet, will retry")
-        return
+        controller = getattr(movie, "PlayerOwner", None)
+        if controller is None:
+            return True  # no owning controller is not something retrying fixes
 
-    recolor_player(obj)
-    pending_pawn = None
+        choices = [random.randint(0, cell_count - 1) for _ in range(2)]
+        controller.VSS_ColorChoice[0] = choices[0]
+        controller.VSS_ColorChoice[1] = choices[1]
+        logging.info(f"[ColorRandomizer] VSS menu ({cell_count} swatches) - set VSS_ColorChoice={choices}")
+        return True
+    except Exception as ex:  # noqa: BLE001
+        logging.warning(f"[ColorRandomizer] could not randomize VSS color choice: {ex!r}")
+        return True
 
 
 @hook("WillowGame.VehicleSpawnStationGFxMovie:Start", Type.POST)
@@ -294,50 +305,80 @@ def on_vss_menu_opened(
     __ret: any,
     __func: BoundFunction,
 ) -> None:
-    """Point the Catch-A-Ride color menu at a random valid swatch.
+    """Mark the just-opened VSS color menu as needing its choice randomized."""
+    global pending_vss_movie, ticks_until_retry
+    pending_vss_movie = obj
+    ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
 
-    Our vehicles are recolored by writing material parameters directly
-    (recolor_vehicle), completely bypassing the menu's own swatch-index
-    system - so WillowPlayerController.VSS_ColorChoice[slot] (the per-bay
-    index the menu remembers and re-shows next time it opens, confirmed in
-    WillowPlayerController.uc/VehicleSpawnStationGFxMovie.uc: written on
-    OnClose, read back on open) never changes, and the menu kept showing
-    whatever it defaulted to - confirmed in play as always "blue".
 
-    This does not make the highlighted swatch match the vehicle's actual
-    (continuous, not palette-based) paint - by design, per explicit
-    instruction, since there is no reliable way to read the real swatch
-    RGB values (they live in the menu's Flash asset, not anywhere script-
-    readable - see random_hsl_rgb's docstring). It only stops the menu
-    always defaulting to the same one.
+@hook("WillowGame.VehicleSpawnStationGFxMovie:OnClose", Type.POST)
+def on_vss_menu_closed(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Drop a still-pending VSS randomization once its menu closes.
 
-    ColorNavigator.Cells is populated synchronously by InitButtons(),
-    called earlier in this same Start() - by the time this POST hook runs,
-    Cells.Length is the real, current swatch count for this specific menu,
-    not guessed. Sets both vehicle bays (index 0 and 1) since either could
-    be opened. May take one extra menu open to visibly apply, if VSSVM_Index
-    (what actually draws the highlight this frame) turns out to already be
-    latched from VSS_ColorChoice before this hook runs, in native code this
-    mod cannot see or hook into - not confirmed either way.
+    Without this, a menu opened and closed again before its cells ever
+    populated would leave pending_vss_movie pointing at a GFxMovie the game
+    may destroy - reading a destroyed object's properties is exactly the
+    class of risk CLAUDE.md's own "never read from an object after handing
+    it to an API that may destroy it" rule warns about, even though this
+    mod never explicitly destroys it itself.
     """
-    try:
-        navigator = getattr(obj, "ColorNavigator", None)
-        cells = getattr(navigator, "Cells", None) if navigator is not None else None
-        cell_count = len(cells) if cells is not None else 0
-        if cell_count <= 0:
-            logging.warning("[ColorRandomizer] VSS menu opened with no color cells found, skipping")
-            return
+    global pending_vss_movie
+    if pending_vss_movie is obj:
+        pending_vss_movie = None
 
-        controller = getattr(obj, "PlayerOwner", None)
-        if controller is None:
-            return
 
-        choices = [random.randint(0, cell_count - 1) for _ in range(2)]
-        controller.VSS_ColorChoice[0] = choices[0]
-        controller.VSS_ColorChoice[1] = choices[1]
-        logging.info(f"[ColorRandomizer] VSS menu opened ({cell_count} swatches) - set VSS_ColorChoice={choices}")
-    except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] could not randomize VSS color choice: {ex!r}")
+@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
+def on_recolor_retry(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Apply pending recolors once their target actually looks ready.
+
+    This DOES hook PlayerTick, which CLAUDE.md's own rule says to avoid -
+    justified here because it is the rule's own explicitly-named escape
+    hatch ("where a tick hook is genuinely unavoidable, gate it behind a
+    counter/timer so the real work runs far less often than every frame"):
+    there is no single dedicated event confirmed to fire only once the
+    pawn's body/materials, or the VSS menu's color cells, are actually
+    ready - both were tried as one-shot hooks first and confirmed in play
+    to fire too early - so this polls for readiness instead of for the
+    triggering event itself, at a throttled rate, and does entirely nothing
+    once both are resolved (`pending_pawn is None and pending_vss_movie is
+    None`) instead of running every frame for the rest of the session.
+    """
+    global pending_pawn, pending_vss_movie, ticks_until_retry
+    if pending_pawn is None and pending_vss_movie is None:
+        return
+    ticks_until_retry -= 1
+    if ticks_until_retry > 0:
+        return
+    ticks_until_retry = RETRY_INTERVAL_TICKS
+
+    if pending_pawn is not None:
+        if obj.Pawn is not pending_pawn:
+            # The pending pawn was replaced (e.g. died again) before it was
+            # ever successfully recolored - drop it and let the newer
+            # Possess() call (which already reset ticks_until_retry) take
+            # over.
+            pending_pawn = None
+        elif not player_pawn_is_ready(pending_pawn):
+            logging.info("[ColorRandomizer] pawn not ready yet, will retry")
+        else:
+            recolor_player(obj)
+            pending_pawn = None
+
+    if pending_vss_movie is not None:
+        if try_randomize_vss_choice(pending_vss_movie):
+            pending_vss_movie = None
+        else:
+            logging.info("[ColorRandomizer] VSS menu not ready yet, will retry")
 
 
 @keybind(
@@ -366,7 +407,13 @@ __version__: str
 __version_info__: tuple[int, ...]
 
 build_mod(
-    hooks=[on_vehicle_spawned, on_player_possessed, on_recolor_retry, on_vss_menu_opened],
+    hooks=[
+        on_vehicle_spawned,
+        on_player_possessed,
+        on_recolor_retry,
+        on_vss_menu_opened,
+        on_vss_menu_closed,
+    ],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
 )
