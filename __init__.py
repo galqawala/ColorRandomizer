@@ -131,6 +131,25 @@ def recolor_vehicle(vehicle) -> bool:
         return False
 
 
+def player_pawn_is_ready(pawn) -> bool:
+    """Whether this pawn's own body/materials setup looks complete enough to
+    recolor meaningfully.
+
+    Confirmed in play: calling SetPlayerUIPreferences() right as Possess()
+    fires does not throw and does set WillowPlayerReplicationInfo's color
+    fields, but produces no visible change - logged evidence was
+    Pawn.BodyClass.HeadAccessoryMeshes reading as 0-length both times, which
+    only happens for a genuinely empty body class OR one that has not
+    finished loading yet. Since UpdatePreferredColors() (called internally,
+    applies the ACTUAL mesh material parameters) reads through this same
+    BodyClass, an unpopulated one is the leading suspect for the silent
+    no-op. Treating "no BodyClass yet" as "not ready" and retrying, rather
+    than accepting whatever Possess() handed us immediately, costs nothing
+    when it turns out BodyClass was already fine.
+    """
+    return getattr(pawn, "BodyClass", None) is not None
+
+
 def recolor_player(controller) -> bool:
     """Reroll one player's own colors and head accessory. Returns success.
 
@@ -160,7 +179,10 @@ def recolor_player(controller) -> bool:
             random_byte_color(),
             head_index,
         )
-        logging.info(f"[ColorRandomizer] rerolled player colors, head={head_index} (of {head_count})")
+        logging.info(
+            f"[ColorRandomizer] rerolled player colors, head={head_index} (of {head_count},"
+            f" body_class={'set' if body_class is not None else 'NONE'})"
+        )
         return True
     except Exception as ex:  # noqa: BLE001
         logging.warning(f"[ColorRandomizer] could not reroll player colors: {ex!r}")
@@ -179,6 +201,14 @@ def on_vehicle_spawned(
     recolor_vehicle(obj)
 
 
+# The pawn most recently possessed but not yet successfully recolored, or
+# None once it has been (or there is nothing pending). Read by the throttled
+# retry hook below - see its docstring for why a retry exists at all.
+pending_pawn = None
+ticks_until_retry = 0
+RETRY_INTERVAL_TICKS = 30
+
+
 @hook("WillowGame.WillowPlayerController:Possess", Type.POST)
 def on_player_possessed(
     obj: UObject,
@@ -186,27 +216,75 @@ def on_player_possessed(
     __ret: any,
     __func: BoundFunction,
 ) -> None:
-    """Recolor the local player exactly once per possession.
+    """Mark the newly-possessed pawn as needing a recolor.
 
     Fires once per Possess() call (game start, respawn after death, level
-    transitions) - not every tick. Two earlier versions of this hook were
-    tried and rejected, in order: (1) WillowPawn:PostBeginPlay, filtered to
-    the local player's own pawn via `get_pc().Pawn is obj` - confirmed in
-    play NOT to fire at actual game start, because `get_pc().Pawn` was not
-    yet linked back to the newly-created pawn at the exact instant
-    PostBeginPlay ran on it; (2) WillowPlayerController:PlayerTick, tracking
-    the last-recolored pawn by identity - this worked, but hooks every
-    single rendered frame forever for a check that only ever matters once
-    per spawn (see CLAUDE.md's PlayerTick rule). Possess(Pawn aPawn, bool
-    bVehicleTransition) hands the newly-possessed pawn directly as an
-    argument, sidestepping both problems at once: no per-tick cost, and no
-    ordering race, because it fires exactly when the controller takes
-    ownership of aPawn - there is nothing to wait for.
+    transitions) - not every tick. An earlier version of this hook was
+    WillowPawn:PostBeginPlay, filtered to the local player's own pawn via
+    `get_pc().Pawn is obj` - confirmed in play NOT to fire at actual game
+    start, because `get_pc().Pawn` was not yet linked back to the
+    newly-created pawn at the exact instant PostBeginPlay ran on it. Before
+    that, WillowPlayerController:PlayerTick worked but hooked every single
+    rendered frame forever (see CLAUDE.md's PlayerTick rule).
+
+    Possess(Pawn aPawn, bool bVehicleTransition) sidesteps the pawn/
+    controller link race - it fires exactly when the controller takes
+    ownership of aPawn, so there is nothing to wait for there. But
+    confirmed in play (2026-08-16): calling SetPlayerUIPreferences() this
+    early does not throw, yet produces no visible change and reads
+    Pawn.BodyClass.HeadAccessoryMeshes as empty - the pawn's own body/
+    material setup is apparently not finished yet even though the pawn
+    object itself exists and is possessed. This hook only records that a
+    recolor is owed; on_recolor_retry below applies it once the pawn
+    actually looks ready, retrying at a low rate rather than every tick.
     """
+    global pending_pawn, ticks_until_retry
     controller = get_pc()
     if controller is not obj:
         return
-    recolor_player(controller)
+    pending_pawn = obj.Pawn
+    ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
+
+
+@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
+def on_recolor_retry(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Apply the pending recolor once the possessed pawn looks ready.
+
+    This DOES hook PlayerTick, which CLAUDE.md's own rule says to avoid -
+    justified here because it is the rule's own explicitly-named escape
+    hatch ("where a tick hook is genuinely unavoidable, gate it behind a
+    counter/timer so the real work runs far less often than every frame"):
+    there is no single dedicated event confirmed to fire only once the
+    pawn's body/materials are actually ready (Possess fires too early - see
+    on_player_possessed above), so this polls for readiness instead of for
+    the spawn itself, at a throttled rate, and does entirely nothing
+    (`pending_pawn is None`) once resolved instead of running every frame
+    for the rest of the session.
+    """
+    global pending_pawn, ticks_until_retry
+    if pending_pawn is None:
+        return
+    ticks_until_retry -= 1
+    if ticks_until_retry > 0:
+        return
+    ticks_until_retry = RETRY_INTERVAL_TICKS
+
+    if obj.Pawn is not pending_pawn:
+        # The pending pawn was replaced (e.g. died again) before it was ever
+        # successfully recolored - drop it and let the newer Possess() call
+        # (which already reset ticks_until_retry) take over.
+        return
+    if not player_pawn_is_ready(pending_pawn):
+        logging.info("[ColorRandomizer] pawn not ready yet, will retry")
+        return
+
+    recolor_player(obj)
+    pending_pawn = None
 
 
 @keybind(
@@ -234,7 +312,7 @@ __version__: str
 __version_info__: tuple[int, ...]
 
 build_mod(
-    hooks=[on_vehicle_spawned, on_player_possessed],
+    hooks=[on_vehicle_spawned, on_player_possessed, on_recolor_retry],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
 )
