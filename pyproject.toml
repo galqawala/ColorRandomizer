@@ -1,15 +1,15 @@
 [project]
-name = "RandomVehicleColor"
-version = "1.0.1"
+name = "ColorRandomizer"
+version = "1.0.2"
 authors = [{ name = "galqawala" }]
-description = "Gives every vehicle (Runner, Racer, etc.) a random paint color the moment it spawns."
+description = "Randomizes your character's colors and head, and every vehicle's paint, on spawn - plus a keybind to reroll on demand."
 
 [tool.sdkmod]
-name = "RandomVehicleColor"
+name = "ColorRandomizer"
 supported_games = ["BL1", "BL1E"]
 coop_support = "Unknown"
 auto_enable = true
-download = "https://github.com/galqawala/RandomVehicleColor/raw/refs/heads/master/RandomVehicleColor.sdkmod"
+download = "https://github.com/galqawala/ColorRandomizer/raw/refs/heads/master/ColorRandomizer.sdkmod"
 
 [tool.sdkmod.license]
 name = "GPL3"
