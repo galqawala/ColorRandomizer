@@ -298,6 +298,22 @@ def try_randomize_vss_choice(movie) -> bool:
         return True
 
 
+# One-shot diagnostic: two prior guesses at "when is ColorNavigator.Cells
+# actually populated" (Start()'s own POST hook, then a 30-tick throttled
+# retry) were both confirmed wrong in play. Rather than guess a third hook
+# blind, capture the REAL call sequence around a menu open with
+# unrealsdk.hooks.log_all_calls (writes every Unreal function call to
+# unrealsdk.calls.tsv next to unrealsdk.log - "best used in short bursts for
+# debugging" per its own docstring). Bounded to ~2 seconds so the .tsv stays
+# a manageable size; turned off unconditionally by on_recolor_retry below
+# regardless of throttling, since the countdown itself needs frame accuracy.
+# DELETE this whole mechanism (this block, the countdown in on_recolor_retry,
+# and CALL_TRACE_TICKS) once the real trigger is found and used instead -
+# it is a debugging aid, not a permanent feature.
+call_trace_ticks_remaining = 0
+CALL_TRACE_TICKS = 120  # roughly 2 seconds at 60fps
+
+
 @hook("WillowGame.VehicleSpawnStationGFxMovie:Start", Type.POST)
 def on_vss_menu_opened(
     obj: UObject,
@@ -306,9 +322,13 @@ def on_vss_menu_opened(
     __func: BoundFunction,
 ) -> None:
     """Mark the just-opened VSS color menu as needing its choice randomized."""
-    global pending_vss_movie, ticks_until_retry
+    global pending_vss_movie, ticks_until_retry, call_trace_ticks_remaining
     pending_vss_movie = obj
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
+
+    unrealsdk.hooks.log_all_calls(True)
+    call_trace_ticks_remaining = CALL_TRACE_TICKS
+    logging.info("[ColorRandomizer] VSS menu opened - call trace started (~2s)")
 
 
 @hook("WillowGame.VehicleSpawnStationGFxMovie:OnClose", Type.POST)
@@ -353,7 +373,17 @@ def on_recolor_retry(
     once both are resolved (`pending_pawn is None and pending_vss_movie is
     None`) instead of running every frame for the rest of the session.
     """
-    global pending_pawn, pending_vss_movie, ticks_until_retry
+    global pending_pawn, pending_vss_movie, ticks_until_retry, call_trace_ticks_remaining
+
+    if call_trace_ticks_remaining > 0:
+        # Frame-accurate countdown, deliberately not subject to the
+        # throttling below - see the diagnostic block above
+        # on_vss_menu_opened for why this exists.
+        call_trace_ticks_remaining -= 1
+        if call_trace_ticks_remaining == 0:
+            unrealsdk.hooks.log_all_calls(False)
+            logging.info("[ColorRandomizer] call trace window closed")
+
     if pending_pawn is None and pending_vss_movie is None:
         return
     ticks_until_retry -= 1
