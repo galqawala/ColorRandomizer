@@ -39,15 +39,26 @@ from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
 
 
 def random_hsv_rgb() -> tuple[float, float, float]:
-    """A random, reasonably vivid/bright RGB triple (0-1 each).
+    """A random RGB triple (0-1 each) covering a genuinely broad range.
 
-    Hue fully random; saturation and value kept high (0.6-1.0 each) so the
-    result reads as an actual color choice rather than something muddy or
-    near-black/near-white.
+    This is NOT sampled from the game's own character-customization color
+    grid - that grid's actual swatch values live inside the menu's
+    Scaleform/Flash asset, not in anything the UnrealScript/Python side can
+    read (the script side only tracks which cell/index was picked, via
+    CellsNavigator in PlayerRegistrationGFxHelper.uc, not the color each
+    cell represents). Short of parsing the .swf itself, there's no in-game
+    palette to draw from here - these are procedurally generated instead.
+
+    Hue fully random. Saturation 0.25-1.0 and value 0.35-1.0 (previously
+    0.6-1.0 for both) - confirmed in play that the narrower range made every
+    result look like the same handful of neon/highlighter tones. This wider
+    range still excludes the extremes (near-grey at the low end, near-black/
+    near-white at the other) so results stay readable as an actual paint
+    color, but now covers muted and pastel tones too, not just vivid ones.
     """
     hue = random.random()
-    saturation = random.uniform(0.6, 1.0)
-    value = random.uniform(0.6, 1.0)
+    saturation = random.uniform(0.25, 1.0)
+    value = random.uniform(0.35, 1.0)
     return colorsys.hsv_to_rgb(hue, saturation, value)
 
 
@@ -164,22 +175,37 @@ def on_vehicle_spawned(
     recolor_vehicle(obj)
 
 
-@hook("WillowGame.WillowPawn:PostBeginPlay", Type.POST)
-def on_player_spawned(
+last_recolored_pawn = None
+
+
+@hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
+def on_player_tick(
     obj: UObject,
     __args: WrappedStruct,
     __ret: any,
     __func: BoundFunction,
 ) -> None:
-    # WillowPawn is also every enemy/NPC's base class (WillowPlayerPawn does
-    # not override PostBeginPlay itself - confirmed absent from
-    # WillowPlayerPawn.uc, so hooking that path would never fire at all) -
-    # the identity check below is what actually restricts this to the local
-    # player's own pawn.
-    controller = get_pc()
-    if controller is None or controller.Pawn is not obj:
+    """Recolor the local player exactly once per pawn, tracked by identity.
+
+    Originally a WillowPawn:PostBeginPlay hook (filtered to the local
+    player's own pawn via `get_pc().Pawn is obj`), matching how the vehicle
+    hook works - confirmed in play NOT to fire at the very start of a
+    session: `get_pc().Pawn` was not yet linked back to the newly-created
+    pawn at the exact instant PostBeginPlay ran on it, so the identity check
+    failed on the one spawn that mattered most, and only the manual reroll
+    keybind ever actually applied a color. PlayerTick only ever fires once
+    the pawn is fully alive and controlled, so this reads Pawn once it is
+    unambiguously valid instead of trying to catch the exact spawn instant -
+    same "identity/generation tracking beats sampling a transient state"
+    approach already used elsewhere in this collection of mods (e.g.
+    AutoLootBL1E's own world-settled tracking).
+    """
+    global last_recolored_pawn
+    pawn = obj.Pawn
+    if pawn is None or pawn is last_recolored_pawn:
         return
-    recolor_player(controller)
+    last_recolored_pawn = pawn
+    recolor_player(obj)
 
 
 @keybind(
@@ -207,7 +233,7 @@ __version__: str
 __version_info__: tuple[int, ...]
 
 build_mod(
-    hooks=[on_vehicle_spawned, on_player_spawned],
+    hooks=[on_vehicle_spawned, on_player_tick],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
 )
