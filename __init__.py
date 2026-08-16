@@ -344,20 +344,21 @@ def on_vss_menu_opened(
     "Reroll Colors",
     "Insert",
     description=(
-        "Reroll your character's colors/head, and your vehicle's paint if"
-        " you're currently driving one."
+        "Reroll your vehicle's paint if you're driving one, otherwise your"
+        " character's colors/head."
     ),
 )
 def reroll_colors() -> None:
     controller = get_pc()
     if controller is None:
         return
-    recolor_player(controller)
 
     pawn = controller.Pawn
     vehicle = getattr(pawn, "DrivenVehicle", None) if pawn is not None else None
     if vehicle is not None:
         recolor_vehicle(vehicle)
+    else:
+        recolor_player(controller)
 
 
 # Gets populated from `build_mod` below
