@@ -189,6 +189,15 @@ def recolor_player(controller) -> bool:
         return False
 
 
+# One-shot diagnostic: does something else re-apply the terminal's "official"
+# chosen color to the vehicle sometime AFTER PostBeginPlay, silently
+# overwriting our random one? Traces every Unreal call for ~3s starting at
+# spawn - see on_recolor_retry's countdown for how this is turned back off.
+# DELETE this and the countdown once answered.
+vehicle_trace_ticks_remaining = 0
+VEHICLE_TRACE_TICKS = 180  # roughly 3 seconds at 60fps
+
+
 @hook("WillowGame.WillowVehicle:PostBeginPlay", Type.POST)
 def on_vehicle_spawned(
     obj: UObject,
@@ -196,9 +205,14 @@ def on_vehicle_spawned(
     __ret: any,
     __func: BoundFunction,
 ) -> None:
+    global vehicle_trace_ticks_remaining
     if not is_host(obj):
         return
     recolor_vehicle(obj)
+
+    unrealsdk.hooks.log_all_calls(True)
+    vehicle_trace_ticks_remaining = VEHICLE_TRACE_TICKS
+    logging.info("[ColorRandomizer] vehicle spawned - call trace started (~3s)")
 
 
 # The pawn most recently possessed but not yet successfully recolored, or
@@ -325,7 +339,16 @@ def on_recolor_retry(
     (`pending_pawn is None`) once resolved instead of running every frame
     for the rest of the session.
     """
-    global pending_pawn, ticks_until_retry
+    global pending_pawn, ticks_until_retry, vehicle_trace_ticks_remaining
+
+    if vehicle_trace_ticks_remaining > 0:
+        # Frame-accurate countdown, deliberately not subject to the
+        # throttling below - see on_vehicle_spawned's diagnostic block.
+        vehicle_trace_ticks_remaining -= 1
+        if vehicle_trace_ticks_remaining == 0:
+            unrealsdk.hooks.log_all_calls(False)
+            logging.info("[ColorRandomizer] vehicle call trace window closed")
+
     if pending_pawn is None:
         return
     ticks_until_retry -= 1
