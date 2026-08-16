@@ -1,8 +1,8 @@
 [project]
 name = "ColorRandomizer"
-version = "1.0.18"
+version = "1.0.19"
 authors = [{ name = "galqawala" }]
-description = "Randomizes your character's colors and head, and every vehicle's paint, on spawn - plus a keybind to reroll on demand."
+description = "Randomizes your character's colors and head accessory on spawn - plus a keybind to reroll on demand."
 
 [tool.sdkmod]
 name = "ColorRandomizer"

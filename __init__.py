@@ -8,34 +8,29 @@ from unrealsdk import logging
 from unrealsdk.hooks import Type
 from unrealsdk.unreal import BoundFunction, UObject, WrappedStruct
 
-# Randomizes vehicle paint on spawn, and the player's own colors/head on
-# spawn, plus a keybind to reroll either on demand.
+# Randomizes the player's own colors and head accessory on spawn, plus a
+# keybind to reroll on demand.
 #
-# Vehicle mechanism: WillowVehicle.ServerSetVehicleMaterial(MaterialInstance)
-# - the same call the game's own vehicle-material replication already uses.
-# The two paint parameters, "Vehicle_Color" and "Trim_color", were read
-# directly out of each game's own veh_runner.upk FName table (not guessed) -
-# both BL1 and BL1E's Runner material declares exactly these two names.
-# Other vehicle types (e.g. the DLC Salt Racer) do not have them at all,
-# confirmed the same way against their own package - setting an unknown
-# parameter name on a MaterialInstanceConstant is a harmless no-op in UE3,
-# so this mod simply has no visible effect on those rather than failing.
+# Mechanism: WillowPlayerController.SetPlayerUIPreferences(name, PrimaryColor,
+# SecondaryColor, TertiaryColor, HeadAccessory) - the same function the
+# character-customization menu itself calls. Routes itself correctly whether
+# called on the host or a client (checks Role internally and either applies
+# directly or fires its own server RPC), so no host-gating is needed.
+# HeadAccessory is an index into Pawn.BodyClass.HeadAccessoryMeshes
+# (-1 = no accessory); PrimaryColor/SecondaryColor/TertiaryColor are
+# byte-channel Color structs - confirmed from each field's own var
+# declaration in WillowPlayerController.uc/Core/Object.uc.
 #
-# Player mechanism: WillowPlayerController.SetPlayerUIPreferences(name,
-# PrimaryColor, SecondaryColor, TertiaryColor, HeadAccessory) - the same
-# function the character-customization menu itself calls. Unlike the vehicle
-# call, this one already routes itself correctly whether called on the host
-# or a client (checks Role internally and either applies directly or fires
-# its own server RPC), so no host-gating is needed for it. HeadAccessory is
-# an index into Pawn.BodyClass.HeadAccessoryMeshes (-1 = no accessory);
-# PrimaryColor/SecondaryColor/TertiaryColor are byte-channel Color structs,
-# not the LinearColor vehicles use - confirmed from each field's own var
-# declaration in WillowPlayerController.uc/Core/Object.uc, not assumed from
-# the vehicle side.
+# Confirmed present under the same names in both BL1 vanilla's own
+# decompiled class dump and BL1E's - this mod supports both without any
+# per-game branching.
 #
-# Both mechanisms were independently confirmed present under the same names
-# in BL1 vanilla's own decompiled class dump as well as BL1E's - this mod
-# supports both without any per-game branching.
+# Vehicle paint and Catch-A-Ride color-picker randomization were both
+# attempted and removed (2026-08-16): vehicle recoloring left vehicles
+# showing a broken-looking flat blue/gray model rather than a real paint
+# job, and the picker's swatch highlight could be moved (confirmed via a
+# real unrealsdk.calls.tsv trace) but never actually committed as a
+# selection - out of scope for now.
 
 
 def random_hsl_rgb() -> tuple[float, float, float]:
@@ -51,14 +46,11 @@ def random_hsl_rgb() -> tuple[float, float, float]:
 
     Hue, saturation AND lightness are each drawn from the FULL 0-1 range -
     every possible color is possible, including near-black/near-white/
-    near-grey results, per explicit instruction rather than the previous
-    version's "looks nice" 0.25-1.0/0.35-1.0 subrange (itself a widening of
-    an even narrower 0.6-1.0 range that made everything look neon - see
-    CLAUDE.md's "randomize a color" rule for why narrowing this by default
-    is wrong). True HSL (colorsys.hls_to_rgb, h/l/s argument order) rather
-    than HSV, as specifically requested - they are different models: HSL's
-    L=1.0 is white regardless of saturation, HSV's V=1.0 at S=1.0 is a pure
-    vivid color.
+    near-grey results, per explicit instruction. True HSL
+    (colorsys.hls_to_rgb, h/l/s argument order) rather than HSV, as
+    specifically requested - they are different models: HSL's L=1.0 is
+    white regardless of saturation, HSV's V=1.0 at S=1.0 is a pure vivid
+    color.
     """
     hue = random.random()
     lightness = random.random()
@@ -66,69 +58,11 @@ def random_hsl_rgb() -> tuple[float, float, float]:
     return colorsys.hls_to_rgb(hue, lightness, saturation)
 
 
-def random_linear_color() -> WrappedStruct:
-    """A random color as a LinearColor struct (float 0-1 channels) - what
-    MaterialInstanceConstant.SetVectorParameterValue expects."""
-    r, g, b = random_hsl_rgb()
-    return unrealsdk.make_struct("LinearColor", R=r, G=g, B=b, A=1.0)
-
-
 def random_byte_color() -> WrappedStruct:
     """A random color as a Color struct (byte 0-255 channels) - what
     SetPlayerUIPreferences expects for the player's own colors."""
     r, g, b = random_hsl_rgb()
     return unrealsdk.make_struct("Color", R=int(r * 255), G=int(g * 255), B=int(b * 255), A=255)
-
-
-def is_host(actor) -> bool:
-    """Whether the LOCAL machine has authority over this actor.
-
-    ROLE_Authority=3 (Engine.Actor.ENetRole, confirmed in the class dump) -
-    an unreadable Role fails toward "not the host" rather than risking a
-    multi-client race (see recolor_vehicle's docstring).
-    """
-    try:
-        return int(actor.Role) == 3
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def recolor_vehicle(vehicle) -> bool:
-    """Apply a fresh random paint job to one vehicle actor. Returns success.
-
-    Callers decide whether host-gating is needed: the automatic spawn hook
-    below gates to the host, because PostBeginPlay fires independently on
-    every connected machine's own copy of the same newly-spawned vehicle -
-    without gating, every client would roll and push a DIFFERENT random
-    color for the identical vehicle at once, and whichever reached the
-    server last would silently win, briefly flickering between colors. The
-    keybind below does NOT gate: a keypress only ever happens on the one
-    machine that pressed it, so there is no competing call to race against,
-    and ServerSetVehicleMaterial is a real RPC (unlike AutoContainerMod's
-    old UsedBy() bug elsewhere in this collection of mods) - it correctly
-    reaches the server and replicates back down even when called by a
-    remote client driving the vehicle, just with a brief network round trip
-    instead of an instant local change.
-    """
-    parent = getattr(vehicle, "VehicleMaterial", None)
-    if parent is None or parent.Class is None:
-        logging.warning("[ColorRandomizer] vehicle has no VehicleMaterial yet, skipping")
-        return False
-    try:
-        # outer=vehicle.Outer, not vehicle itself - matches the game's own
-        # `new (Outer) MI.Class` in WillowVehicle.uc, where the bare `Outer`
-        # inside a WillowVehicle method means self.Outer (its own containing
-        # level/package), not the vehicle actor.
-        new_material = unrealsdk.construct_object(parent.Class, vehicle.Outer)
-        new_material.SetParent(parent)
-        new_material.SetVectorParameterValue("Vehicle_Color", random_linear_color())
-        new_material.SetVectorParameterValue("Trim_color", random_linear_color())
-        vehicle.ServerSetVehicleMaterial(new_material)
-        logging.info(f"[ColorRandomizer] recolored {vehicle.Class.Name}")
-        return True
-    except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] could not recolor {vehicle.Class.Name}: {ex!r}")
-        return False
 
 
 def player_pawn_is_ready(pawn) -> bool:
@@ -189,46 +123,6 @@ def recolor_player(controller) -> bool:
         return False
 
 
-# Vehicle paint recoloring is DISABLED as of 2026-08-16. Confirmed in play:
-# vehicles were consistently showing as a flat, low-detail blue/gray model -
-# not the original vehicle appearance and not our random color either,
-# consistent with a broken/fallback material rather than a "didn't apply"
-# problem. Constructing a new MaterialInstanceConstant parented to the
-# vehicle's own existing VehicleMaterial wrapper (an instance-of-an-instance
-# chain) is the leading suspect, unconfirmed. recolor_vehicle() and its
-# hooks are left in place, just not called, so this can be re-enabled and
-# debugged later without rewriting it from scratch - do not delete.
-#
-# @hook("WillowGame.WillowVehicle:PostBeginPlay", Type.POST)
-# def on_vehicle_spawned(
-#     obj: UObject,
-#     __args: WrappedStruct,
-#     __ret: any,
-#     __func: BoundFunction,
-# ) -> None:
-#     if not is_host(obj):
-#         return
-#     recolor_vehicle(obj)
-
-
-# Also disabled along with on_vehicle_spawned above (see that comment) -
-# this was the "reapply once the materialize animation ends" half of the
-# same now-disabled feature.
-#
-# @hook("WillowGame.WillowVehicle:SetVehicleSpawning", Type.POST)
-# def on_vehicle_spawning_changed(
-#     obj: UObject,
-#     args: WrappedStruct,
-#     __ret: any,
-#     __func: BoundFunction,
-# ) -> None:
-#     if not is_host(obj):
-#         return
-#     if getattr(args, "bInSpawning", True):
-#         return  # only reapply once, on the exit (false) transition
-#     recolor_vehicle(obj)
-
-
 # The pawn most recently possessed but not yet successfully recolored, or
 # None once it has been (or there is nothing pending). Read by the throttled
 # retry hook below - see its docstring for why a retry exists at all.
@@ -274,92 +168,6 @@ def on_player_possessed(
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
 
 
-@hook("WillowGame.VehicleSpawnStationGFxMovie:extStartColorPicking", Type.POST)
-def on_vss_color_picking_started(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Move the freshly-opened color picker to a random swatch.
-
-    Found by reading an actual unrealsdk.calls.tsv trace of a real manual
-    color pick, after two static-analysis guesses were each confirmed wrong
-    or broken in play:
-      1. WillowPlayerController.VSS_ColorChoice - a merely-persisted
-         preference field, no confirmed reader anywhere.
-      2. AS_SetPrimaryColorIndex(index), called directly - ran with no
-         errors but no visible effect. The trace explains why: extSetupCell
-         (menu SETUP, not the interactive picker) already calls this once
-         per swatch as part of its OWN self-contained callback loop with
-         Flash (AS_SetPrimaryColorIndex -> Flash -> extSetPrimaryColorIndex
-         resets PrimaryColorIndex), 16 times total in the trace (8 swatches
-         x 2 vehicle bays) - completely disconnected from the interactive
-         picker, and almost certainly what was clobbering earlier attempts
-         that tried to set state during that phase.
-      3. SetCellState+AS_UpdateColorBox, called manually during extSetupCell
-         - confirmed in play to leave MULTIPLE swatches stuck highlighted,
-         consistent with fighting the callback loop above: this mod's own
-         PrimaryColorIndex bookkeeping went stale each time the native
-         callback reset it, so the old/new SetCellState pairing was working
-         off the wrong "old" value.
-
-    The trace showed the REAL, clean flow: extStartColorPicking (enter the
-    picker - calls SetCellState(current, true) once) -> extColorCellHover
-    (each real hover - does SetCellState(old, false) + SetCellState(new,
-    true) + AS_UpdateColorBox, reading PrimaryColorIndex itself so it can
-    never go stale) -> extFinishColorPicking (exit).
-
-    Per explicit instruction: rather than trust extColorCellHover alone,
-    this now calls every function seen in that trace with the SAME random
-    cell, one after another, each in its own try/except so one failing
-    (e.g. a signature this mod guessed wrong) does not stop the rest -
-    extColorCellHover (real hover, PROVEN to update the display correctly),
-    extSetPrimaryColorIndex (the Flash->script callback function, called
-    directly instead of waiting for Flash to call it), AS_SetPrimaryColorIndex
-    and AS_UpdateColorBox (the two script->Flash ActionScript calls),
-    SetCellState (the low-level per-cell highlight toggle, on+off), and
-    extUpdateColorBox (the "commit" function that writes VSSVM_Index[
-    CurrentTab] - the only one in this list not otherwise reached by
-    extColorCellHover's own call chain). Each attempt is logged by name so
-    a future pass can tell exactly which ones actually ran without error.
-    """
-    navigator = getattr(obj, "ColorNavigator", None)
-    cells = getattr(navigator, "Cells", None) if navigator is not None else None
-    cell_count = len(cells) if cells is not None else 0
-    if cell_count <= 0:
-        return
-
-    new_index = random.randint(0, cell_count - 1)
-    old_index = getattr(obj, "PrimaryColorIndex", 0)
-    try:
-        old_name = navigator.CellName(old_index)
-        new_name = navigator.CellName(new_index)
-    except Exception as ex:  # noqa: BLE001
-        logging.warning(f"[ColorRandomizer] VSS: could not resolve cell names: {ex!r}")
-        return
-
-    logging.info(
-        f"[ColorRandomizer] VSS color picker opened - calling every traced"
-        f" function with swatch {new_index} ('{new_name}') of {cell_count}"
-    )
-
-    def attempt(label: str, func) -> None:
-        try:
-            func()
-            logging.info(f"[ColorRandomizer] VSS via {label}: ok")
-        except Exception as ex:  # noqa: BLE001
-            logging.warning(f"[ColorRandomizer] VSS via {label}: error {ex!r}")
-
-    attempt("extColorCellHover", lambda: obj.extColorCellHover(new_name))
-    attempt("extSetPrimaryColorIndex", lambda: obj.extSetPrimaryColorIndex(new_name))
-    attempt("AS_SetPrimaryColorIndex", lambda: obj.AS_SetPrimaryColorIndex(new_index))
-    attempt("SetCellState(old,False)", lambda: obj.SetCellState(old_name, False))
-    attempt("SetCellState(new,True)", lambda: obj.SetCellState(new_name, True))
-    attempt("AS_UpdateColorBox", lambda: obj.AS_UpdateColorBox(new_name))
-    attempt("extUpdateColorBox", lambda: obj.extUpdateColorBox(new_index))
-
-
 @hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
 def on_recolor_retry(
     obj: UObject,
@@ -403,22 +211,13 @@ def on_recolor_retry(
 @keybind(
     "Reroll Colors",
     "Insert",
-    description=(
-        "Reroll your vehicle's paint if you're driving one, otherwise your"
-        " character's colors/head."
-    ),
+    description="Reroll your character's colors and head accessory.",
 )
 def reroll_colors() -> None:
     controller = get_pc()
     if controller is None:
         return
-
-    pawn = controller.Pawn
-    vehicle = getattr(pawn, "DrivenVehicle", None) if pawn is not None else None
-    if vehicle is not None:
-        recolor_vehicle(vehicle)
-    else:
-        recolor_player(controller)
+    recolor_player(controller)
 
 
 # Gets populated from `build_mod` below
@@ -429,7 +228,6 @@ build_mod(
     hooks=[
         on_player_possessed,
         on_recolor_retry,
-        on_vss_color_picking_started,
     ],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),

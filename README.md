@@ -1,31 +1,28 @@
 # ColorRandomizer
 
-Randomizes your character's colors and head accessory, and every vehicle's
-paint job, the moment each spawns - plus a keybind (default **Insert**) to
-reroll either on demand. Works in **Borderlands GOTY Enhanced (BL1E)** and
-vanilla **Borderlands 1 (BL1)**.
+Randomizes your character's colors and head accessory the moment you spawn -
+plus a keybind (default **Insert**) to reroll on demand. Works in
+**Borderlands GOTY Enhanced (BL1E)** and vanilla **Borderlands 1 (BL1)**.
 
 ## How it works
 
-- **Vehicles**: hooks `WillowVehicle:PostBeginPlay` and applies a random
-  color to the two paint parameters the game's own Runner material actually
-  uses - `Vehicle_Color` and `Trim_color` (confirmed directly from each
-  game's own `veh_runner.upk`) - through `ServerSetVehicleMaterial`, the
-  same call the game itself uses to replicate a vehicle's paint. Other
-  vehicle types without these parameters (e.g. the DLC Salt Racer) are
-  unaffected rather than erroring.
-- **Character**: hooks the local player pawn's spawn and calls
-  `SetPlayerUIPreferences`, the same function the character-customization
-  screen itself calls, with a random primary/secondary/tertiary color and a
-  random head accessory (or none).
-- **Reroll keybind**: press **Insert** (rebindable in the mod menu) to
-  reroll your character's colors/head immediately, and your current
-  vehicle's paint too if you're driving one.
+Hooks the local player's possession event and calls `SetPlayerUIPreferences`,
+the same function the character-customization screen itself calls, with a
+random primary/secondary/tertiary color (full-range HSL - every color is
+possible) and a random head accessory (or none). Retries for a moment if the
+pawn's body isn't fully loaded yet, since calling this too early produces no
+visible change.
 
-In multiplayer, vehicle recoloring on spawn is host-only (to avoid every
-connected client rolling a different color for the same car at once) and
-then reaches everyone through ordinary replication. Character recoloring and
-the reroll keybind work correctly for both the host and clients.
+Press **Insert** (rebindable in the mod menu) to reroll immediately, without
+waiting to respawn.
+
+## What this mod does NOT do
+
+Vehicle paint and Catch-A-Ride color-picker randomization were both
+attempted and removed: vehicle recoloring left vehicles showing a
+broken-looking flat model rather than a real paint job, and the color
+picker's swatch highlight could be moved but never actually stuck as a
+selection. Out of scope for now.
 
 ## Install
 
