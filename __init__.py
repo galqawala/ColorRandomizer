@@ -246,19 +246,63 @@ def on_player_possessed(
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
 
 
-# --- Temporarily disabled while tracing the real interaction ---
-# Two guesses at what drives the on-screen highlight (VSS_ColorChoice, then
-# AS_SetPrimaryColorIndex, then SetCellState+AS_UpdateColorBox) each either
-# had no visible effect or, per the SetCellState version, a WRONG one
-# (multiple swatches shown highlighted at once - meaning that call chain
-# does affect the display, just not correctly the way this code drives it).
-# Rather than guess a fourth variant, on_vss_menu_opened/on_vss_menu_closed
-# below capture a full, unbounded call trace (unrealsdk.calls.tsv) for the
-# ENTIRE time the menu is open, so a real manual color pick can be traced
-# and the exact real call sequence read directly instead of inferred from
-# static script. Re-enable and fix this function once that trace is read.
-def on_vss_cell_setup_DISABLED(obj) -> None:
-    pass
+@hook("WillowGame.VehicleSpawnStationGFxMovie:extStartColorPicking", Type.POST)
+def on_vss_color_picking_started(
+    obj: UObject,
+    __args: WrappedStruct,
+    __ret: any,
+    __func: BoundFunction,
+) -> None:
+    """Move the freshly-opened color picker to a random swatch.
+
+    Found by reading an actual unrealsdk.calls.tsv trace of a real manual
+    color pick, after two static-analysis guesses were each confirmed wrong
+    or broken in play:
+      1. WillowPlayerController.VSS_ColorChoice - a merely-persisted
+         preference field, no confirmed reader anywhere.
+      2. AS_SetPrimaryColorIndex(index), called directly - ran with no
+         errors but no visible effect. The trace explains why: extSetupCell
+         (menu SETUP, not the interactive picker) already calls this once
+         per swatch as part of its OWN self-contained callback loop with
+         Flash (AS_SetPrimaryColorIndex -> Flash -> extSetPrimaryColorIndex
+         resets PrimaryColorIndex), 16 times total in the trace (8 swatches
+         x 2 vehicle bays) - completely disconnected from the interactive
+         picker, and almost certainly what was clobbering earlier attempts
+         that tried to set state during that phase.
+      3. SetCellState+AS_UpdateColorBox, called manually during extSetupCell
+         - confirmed in play to leave MULTIPLE swatches stuck highlighted,
+         consistent with fighting the callback loop above: this mod's own
+         PrimaryColorIndex bookkeeping went stale each time the native
+         callback reset it, so the old/new SetCellState pairing was working
+         off the wrong "old" value.
+
+    The trace showed the REAL, clean flow: extStartColorPicking (enter the
+    picker - calls SetCellState(current, true) once) -> extColorCellHover
+    (each real hover - does SetCellState(old, false) + SetCellState(new,
+    true) + AS_UpdateColorBox, reading PrimaryColorIndex itself so it can
+    never go stale) -> extFinishColorPicking (exit). Rather than replicate
+    that internal logic a second time (the mistake in attempt 3), this
+    calls extColorCellHover directly - the exact same function a real
+    hover calls, with a random cell name instead of wherever the player's
+    input pointed - so there is exactly one source of truth for "how do I
+    move the highlight" and it can't desync from the real thing.
+    """
+    try:
+        navigator = getattr(obj, "ColorNavigator", None)
+        cells = getattr(navigator, "Cells", None) if navigator is not None else None
+        cell_count = len(cells) if cells is not None else 0
+        if cell_count <= 0:
+            return
+
+        new_index = random.randint(0, cell_count - 1)
+        new_name = navigator.CellName(new_index)
+        obj.extColorCellHover(new_name)
+        logging.info(
+            f"[ColorRandomizer] VSS color picker opened - moved to swatch"
+            f" {new_index} ('{new_name}') of {cell_count}"
+        )
+    except Exception as ex:  # noqa: BLE001
+        logging.warning(f"[ColorRandomizer] could not randomize VSS swatch: {ex!r}")
 
 
 @hook("WillowGame.WillowPlayerController:PlayerTick", Type.POST)
@@ -301,38 +345,6 @@ def on_recolor_retry(
         pending_pawn = None
 
 
-@hook("WillowGame.VehicleSpawnStationGFxMovie:Start", Type.POST)
-def on_vss_menu_opened(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Start a full-session call trace - see on_vss_cell_setup_DISABLED's
-    comment above for why. Unlike the earlier bounded (~2s) trace attempt,
-    this one runs for as long as the menu stays open, closed by
-    on_vss_menu_closed below - long enough to capture an actual manual
-    color pick, not just the menu's own setup. Please keep the menu open
-    only briefly (open, pick one or two different colors, close) to keep
-    unrealsdk.calls.tsv a manageable size - it logs on the order of 10,000
-    lines/second.
-    """
-    unrealsdk.hooks.log_all_calls(True)
-    logging.info("[ColorRandomizer] VSS menu opened - call trace started (unbounded, until close)")
-
-
-@hook("WillowGame.VehicleSpawnStationGFxMovie:OnClose", Type.POST)
-def on_vss_menu_closed(
-    obj: UObject,
-    __args: WrappedStruct,
-    __ret: any,
-    __func: BoundFunction,
-) -> None:
-    """Stop the call trace started by on_vss_menu_opened."""
-    unrealsdk.hooks.log_all_calls(False)
-    logging.info("[ColorRandomizer] VSS menu closed - call trace stopped")
-
-
 @keybind(
     "Reroll Colors",
     "Insert",
@@ -363,8 +375,7 @@ build_mod(
         on_vehicle_spawned,
         on_player_possessed,
         on_recolor_retry,
-        on_vss_menu_opened,
-        on_vss_menu_closed,
+        on_vss_color_picking_started,
     ],
     keybinds=[reroll_colors],
     settings_file=Path(f"{SETTINGS_DIR}/ColorRandomizer.json"),
