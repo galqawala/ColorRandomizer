@@ -1,6 +1,6 @@
 [project]
 name = "ColorRandomizer"
-version = "1.0.20"
+version = "1.0.21"
 authors = [{ name = "galqawala" }]
 description = "Randomizes your character's colors and head accessory on spawn - plus a keybind to reroll on demand."
 

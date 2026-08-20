@@ -197,10 +197,25 @@ def on_player_possessed(
     object itself exists and is possessed. This hook only records that a
     recolor is owed; on_recolor_retry below applies it once the pawn
     actually looks ready, retrying at a low rate rather than every tick.
+
+    bVehicleTransition=True is skipped entirely - confirmed in the BL1E
+    dump (Engine/Vehicle.uc): entering a vehicle calls
+    `Controller.Possess(self, true)` (the VEHICLE becomes Pawn), and
+    exiting calls `Controller.Possess(Driver, true)` to hand control back.
+    A vehicle has no BodyClass at all (that's a WillowPlayerPawn-only
+    field), so player_pawn_is_ready() could never return True for it -
+    without this check, entering a vehicle set pending_pawn to the
+    vehicle and on_recolor_retry then logged "pawn not ready yet, will
+    retry" every RETRY_INTERVAL_TICKS for as long as the player kept
+    driving, reported as log spam while in a vehicle. A vehicle transition
+    is not a new spawn anyway - the same character, same colors - so there
+    is nothing to reroll here regardless of the spam.
     """
     global pending_pawn, ticks_until_retry
     controller = get_pc()
     if controller is not obj:
+        return
+    if bool(getattr(args, "bVehicleTransition", False)):
         return
     pending_pawn = obj.Pawn
     ticks_until_retry = 0  # try on the very next opportunity, not after a full interval
